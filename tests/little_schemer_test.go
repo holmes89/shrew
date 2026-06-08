@@ -42,8 +42,15 @@ func (suite *LittleSchemerTestSuite) LoadLibrary(i int) {
 		suite.FailNow(err.Error())
 	}
 	for _, lib := range strings.Split(string(b), "\n\n") {
+		lib = strings.TrimSpace(lib)
+		if lib == "" {
+			continue
+		}
 		if _, err := repl.Repl(lib, suite.ev); err != nil {
-			fmt.Printf("invalid input: %s", lib)
+			if err.Error() == "<empty line>" {
+				continue
+			}
+			fmt.Printf("invalid input: %s\n", lib)
 			suite.FailNow(err.Error())
 		}
 	}
