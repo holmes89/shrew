@@ -20,6 +20,7 @@ func read(str string) (Expression, error) {
 // eval
 func eval(ast Expression, env EnvType) (Expression, error) {
 	var e error
+continueLoop:
 	for {
 		list, ok := ast.(List)
 
@@ -61,44 +62,253 @@ func eval(ast Expression, env EnvType) (Expression, error) {
 
 		switch a0sym {
 		case "define":
+			// Support (define (f args...) body) shorthand
+			if List_Q(a1) {
+				fnList, _ := GetSlice(a1)
+				if len(fnList) == 0 {
+					return nil, errors.New("define: empty function signature")
+				}
+				name := fnList[0].(Symbol)
+				params := List{Val: fnList[1:]}
+				body := list.Val[2:]
+				var bodyExpr Expression
+				if len(body) == 1 {
+					bodyExpr = body[0]
+				} else {
+					bodyExpr = List{Val: append([]Expression{Symbol{Val: "begin"}}, body...)}
+				}
+				fn := ExpressionFunc{
+					Eval:    eval,
+					Exp:     bodyExpr,
+					Env:     env,
+					Params:  params,
+					IsMacro: false,
+					GenEnv:  NewEnv,
+				}
+				return env.Set(name, fn), nil
+			}
 			res, e := eval(a2, env)
 			if e != nil {
 				return nil, e
 			}
 			return env.Set(a1.(Symbol), res), nil
+		case "begin":
+			fallthrough
+		case "do":
+			if listLen <= 1 {
+				return nil, nil
+			}
+			for _, expr := range list.Val[1 : listLen-1] {
+				if _, e := eval(expr, env); e != nil {
+					return nil, e
+				}
+			}
+			ast = list.Val[listLen-1]
+		case "let":
+			// Support named let: (let name ((var init) ...) body...)
+			if Symbol_Q(a1) {
+				name := a1.(Symbol)
+				bindings, e := GetSlice(a2)
+				if e != nil {
+					return nil, e
+				}
+				let_env, e := NewEnv(env, nil, nil)
+				if e != nil {
+					return nil, e
+				}
+				params := []Expression{}
+				vals := []Expression{}
+				for i := 0; i < len(bindings); i++ {
+					pair, e := GetSlice(bindings[i])
+					if e != nil || len(pair) != 2 {
+						return nil, errors.New("named let: malformed binding")
+					}
+					params = append(params, pair[0])
+					v, e := eval(pair[1], env)
+					if e != nil {
+						return nil, e
+					}
+					vals = append(vals, v)
+				}
+				body := list.Val[3:]
+				var bodyExpr Expression
+				if len(body) == 1 {
+					bodyExpr = body[0]
+				} else {
+					bodyExpr = List{Val: append([]Expression{Symbol{Val: "begin"}}, body...)}
+				}
+				fn := ExpressionFunc{
+					Eval:    eval,
+					Exp:     bodyExpr,
+					Env:     let_env,
+					Params:  List{Val: params},
+					IsMacro: false,
+					GenEnv:  NewEnv,
+				}
+				let_env.Set(name, fn)
+				ast, e = NewEnv(let_env, List{Val: params}, List{Val: vals})
+				if e != nil {
+					return nil, e
+				}
+				// Tail call: invoke fn with initial vals
+				env, e = NewEnv(let_env, List{Val: params}, List{Val: vals})
+				if e != nil {
+					return nil, e
+				}
+				ast = bodyExpr
+				continue
+			}
+			// Regular let: (let ((var val) ...) body...)
+			let_env, e := NewEnv(env, nil, nil)
+			if e != nil {
+				return nil, e
+			}
+			bindings, e := GetSlice(a1)
+			if e != nil {
+				return nil, e
+			}
+			for _, b := range bindings {
+				pair, e := GetSlice(b)
+				if e != nil || len(pair) != 2 {
+					return nil, errors.New("let: malformed binding")
+				}
+				val, e := eval(pair[1], env)
+				if e != nil {
+					return nil, e
+				}
+				let_env.Set(pair[0].(Symbol), val)
+			}
+			for _, expr := range list.Val[2 : listLen-1] {
+				if _, e := eval(expr, let_env); e != nil {
+					return nil, e
+				}
+			}
+			ast = list.Val[listLen-1]
+			env = let_env
 		case "let*":
 			let_env, e := NewEnv(env, nil, nil)
 			if e != nil {
 				return nil, e
 			}
-			arr1, e := GetSlice(a1)
+			bindings, e := GetSlice(a1)
 			if e != nil {
 				return nil, e
 			}
-			for i := 0; i < len(arr1); i += 2 {
-				if !Symbol_Q(arr1[i]) {
-					return nil, errors.New("non-symbol bind value")
+			for _, b := range bindings {
+				pair, e := GetSlice(b)
+				if e != nil || len(pair) != 2 {
+					return nil, errors.New("let*: malformed binding")
 				}
-				exp, e := eval(arr1[i+1], let_env)
+				sym, ok := pair[0].(Symbol)
+				if !ok {
+					return nil, errors.New("let*: binding name must be a symbol")
+				}
+				val, e := eval(pair[1], let_env)
 				if e != nil {
 					return nil, e
 				}
-				let_env.Set(arr1[i].(Symbol), exp)
+				let_env.Set(sym, val)
 			}
-			ast = a2
+			for _, expr := range list.Val[2 : listLen-1] {
+				if _, e := eval(expr, let_env); e != nil {
+					return nil, e
+				}
+			}
+			ast = list.Val[listLen-1]
 			env = let_env
-		case "do":
-			el, e := eval_ast(List{
-				Val: list.Val[1:],
-			}, env)
+		case "letrec":
+			fallthrough
+		case "letrec*":
+			// Bind all names to nil first, then evaluate and set
+			let_env, e := NewEnv(env, nil, nil)
 			if e != nil {
 				return nil, e
 			}
-			lst := el.(List).Val
-			if len(lst) == 1 {
+			bindings, e := GetSlice(a1)
+			if e != nil {
+				return nil, e
+			}
+			names := make([]Symbol, 0, len(bindings))
+			inits := make([]Expression, 0, len(bindings))
+			for _, b := range bindings {
+				pair, e := GetSlice(b)
+				if e != nil || len(pair) != 2 {
+					return nil, errors.New("letrec: malformed binding")
+				}
+				sym, ok := pair[0].(Symbol)
+				if !ok {
+					return nil, errors.New("letrec: binding name must be a symbol")
+				}
+				let_env.Set(sym, nil)
+				names = append(names, sym)
+				inits = append(inits, pair[1])
+			}
+			for i, init := range inits {
+				val, e := eval(init, let_env)
+				if e != nil {
+					return nil, e
+				}
+				let_env.Set(names[i], val)
+			}
+			for _, expr := range list.Val[2 : listLen-1] {
+				if _, e := eval(expr, let_env); e != nil {
+					return nil, e
+				}
+			}
+			ast = list.Val[listLen-1]
+			env = let_env
+		case "when":
+			cond, e := eval(a1, env)
+			if e != nil {
+				return nil, e
+			}
+			if cond == nil || cond == false {
 				return nil, nil
 			}
-			ast = lst[len(lst)-1]
+			for _, expr := range list.Val[2 : listLen-1] {
+				if _, e := eval(expr, env); e != nil {
+					return nil, e
+				}
+			}
+			ast = list.Val[listLen-1]
+		case "unless":
+			cond, e := eval(a1, env)
+			if e != nil {
+				return nil, e
+			}
+			if cond != nil && cond != false {
+				return nil, nil
+			}
+			for _, expr := range list.Val[2 : listLen-1] {
+				if _, e := eval(expr, env); e != nil {
+					return nil, e
+				}
+			}
+			ast = list.Val[listLen-1]
+		case "and":
+			var res Expression = true
+			for _, expr := range list.Val[1:] {
+				v, e := eval(expr, env)
+				if e != nil {
+					return nil, e
+				}
+				if v == nil || v == false {
+					return false, nil
+				}
+				res = v
+			}
+			return res, nil
+		case "or":
+			for _, expr := range list.Val[1:] {
+				v, e := eval(expr, env)
+				if e != nil {
+					return nil, e
+				}
+				if v != nil && v != false {
+					return v, nil
+				}
+			}
+			return false, nil
 		case "defmacro":
 			fn, e := eval(a2, env)
 			fn = fn.(ExpressionFunc).SetMacro()
@@ -122,39 +332,61 @@ func eval(ast Expression, env EnvType) (Expression, error) {
 			} else {
 				ast = a2
 			}
-		case "else":
-			return eval(a1, env)
 		case "cond":
 			for _, c := range list.Val[1:] {
-				cond, ok := c.(List)
+				clause, ok := c.(List)
 				if !ok {
-					return nil, errors.New("does not evaluate")
+					return nil, errors.New("cond: clause must be a list")
 				}
-
-				exp := cond.Val[0]
-				var res Expression
-				var e error
-				if _, ok := exp.(List); ok {
-					res, e = eval(exp, env)
-					if e != nil {
-						return nil, e
-					}
-					if res == true {
-						return eval(cond.Val[1], env)
-					}
-					continue
+				if len(clause.Val) == 0 {
+					return nil, errors.New("cond: empty clause")
 				}
-				//assume else?
-				return eval(cond, env)
+				test := clause.Val[0]
+				// else clause
+				if sym, ok := test.(Symbol); ok && sym.Val == "else" {
+					if len(clause.Val) == 1 {
+						return nil, nil
+					}
+					for _, expr := range clause.Val[1 : len(clause.Val)-1] {
+						if _, e := eval(expr, env); e != nil {
+							return nil, e
+						}
+					}
+					ast = clause.Val[len(clause.Val)-1]
+					goto continueLoop
+				}
+				res, e := eval(test, env)
+				if e != nil {
+					return nil, e
+				}
+				if res != nil && res != false {
+					if len(clause.Val) == 1 {
+						return res, nil
+					}
+					for _, expr := range clause.Val[1 : len(clause.Val)-1] {
+						if _, e := eval(expr, env); e != nil {
+							return nil, e
+						}
+					}
+					ast = clause.Val[len(clause.Val)-1]
+					goto continueLoop
+				}
 			}
-
 			return nil, nil
 		case "λ":
 			fallthrough
 		case "lambda":
+			var bodyExpr Expression
+			if listLen == 3 {
+				bodyExpr = a2
+			} else if listLen > 3 {
+				bodyExpr = List{Val: append([]Expression{Symbol{Val: "begin"}}, list.Val[2:]...)}
+			} else {
+				return nil, errors.New("lambda: missing body")
+			}
 			fn := ExpressionFunc{
 				Eval:    eval,
-				Exp:     a2,
+				Exp:     bodyExpr,
 				Env:     env,
 				Params:  a1,
 				IsMacro: false,

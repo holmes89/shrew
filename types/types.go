@@ -41,8 +41,48 @@ func False_Q(obj Expression) bool {
 }
 
 func Number_Q(obj Expression) bool {
+	switch obj.(type) {
+	case int, float64:
+		return true
+	}
+	return false
+}
+
+func Float_Q(obj Expression) bool {
+	_, ok := obj.(float64)
+	return ok
+}
+
+func Int_Q(obj Expression) bool {
 	_, ok := obj.(int)
 	return ok
+}
+
+func Char_Q(obj Expression) bool {
+	_, ok := obj.(rune)
+	return ok
+}
+
+// ToFloat coerces an int or float64 expression to float64.
+func ToFloat(obj Expression) (float64, bool) {
+	switch v := obj.(type) {
+	case float64:
+		return v, true
+	case int:
+		return float64(v), true
+	}
+	return 0, false
+}
+
+// ToInt coerces a numeric expression to int (truncating floats).
+func ToInt(obj Expression) (int, bool) {
+	switch v := obj.(type) {
+	case int:
+		return v, true
+	case float64:
+		return int(v), true
+	}
+	return 0, false
 }
 
 // Symbols

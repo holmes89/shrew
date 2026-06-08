@@ -5,7 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"os"
 	"strings"
 
 	"github.com/chzyer/readline"
@@ -32,7 +32,7 @@ func init() {
 			if len(a) != 1 {
 				return nil, errors.New("load-file arity mismatch expected: 1")
 			}
-			b, err := ioutil.ReadFile(a[0].(string))
+			b, err := os.ReadFile(a[0].(string))
 			if err != nil {
 				return nil, errors.New("unable to read file")
 			}

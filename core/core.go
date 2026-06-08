@@ -3,7 +3,7 @@ package core
 import (
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"os"
 	"strings"
 	"time"
 
@@ -243,7 +243,7 @@ func str(a []Expression) (Expression, error) {
 // }
 
 func slurp(a []Expression) (Expression, error) {
-	b, e := ioutil.ReadFile(a[0].(string))
+	b, e := os.ReadFile(a[0].(string))
 	if e != nil {
 		return nil, e
 	}
