@@ -61,6 +61,23 @@ continueLoop:
 		}
 
 		switch a0sym {
+		case "set!":
+			if listLen < 3 {
+				return nil, errors.New("set!: requires symbol and value")
+			}
+			sym, ok := a1.(Symbol)
+			if !ok {
+				return nil, errors.New("set!: first argument must be a symbol")
+			}
+			frame := env.Find(sym)
+			if frame == nil {
+				return nil, fmt.Errorf("set!: '%s' not found", sym.Val)
+			}
+			val, e := eval(a2, env)
+			if e != nil {
+				return nil, e
+			}
+			return frame.Set(sym, val), nil
 		case "define":
 			// Support (define (f args...) body) shorthand
 			if List_Q(a1) {
@@ -93,8 +110,6 @@ continueLoop:
 			}
 			return env.Set(a1.(Symbol), res), nil
 		case "begin":
-			fallthrough
-		case "do":
 			if listLen <= 1 {
 				return nil, nil
 			}
@@ -104,6 +119,95 @@ continueLoop:
 				}
 			}
 			ast = list.Val[listLen-1]
+		case "do":
+			// R5RS iterative do: (do ((var init step) ...) (test result ...) body ...)
+			if listLen < 3 {
+				return nil, errors.New("do: requires bindings and test clause")
+			}
+			// Parse variable bindings
+			bindList, e := GetSlice(a1)
+			if e != nil {
+				return nil, errors.New("do: first argument must be a list of bindings")
+			}
+			type doVar struct {
+				sym  Symbol
+				step Expression // nil means no step — var keeps its value
+			}
+			vars := make([]doVar, 0, len(bindList))
+			do_env, e := NewEnv(env, nil, nil)
+			if e != nil {
+				return nil, e
+			}
+			for _, b := range bindList {
+				parts, e := GetSlice(b)
+				if e != nil || len(parts) < 2 {
+					return nil, errors.New("do: malformed binding")
+				}
+				sym, ok := parts[0].(Symbol)
+				if !ok {
+					return nil, errors.New("do: binding name must be a symbol")
+				}
+				initVal, e := eval(parts[1], env)
+				if e != nil {
+					return nil, e
+				}
+				do_env.Set(sym, initVal)
+				var step Expression
+				if len(parts) >= 3 {
+					step = parts[2]
+				}
+				vars = append(vars, doVar{sym, step})
+			}
+			// Parse test clause
+			testClause, e := GetSlice(a2)
+			if e != nil || len(testClause) == 0 {
+				return nil, errors.New("do: test clause must be a non-empty list")
+			}
+			testExpr := testClause[0]
+			resultExprs := testClause[1:]
+			// Iterate
+			for {
+				testVal, e := eval(testExpr, do_env)
+				if e != nil {
+					return nil, e
+				}
+				if testVal != nil && testVal != false {
+					// Test passed — evaluate result expressions
+					if len(resultExprs) == 0 {
+						return nil, nil
+					}
+					for _, r := range resultExprs[:len(resultExprs)-1] {
+						if _, e := eval(r, do_env); e != nil {
+							return nil, e
+						}
+					}
+					return eval(resultExprs[len(resultExprs)-1], do_env)
+				}
+				// Evaluate body forms for side effects
+				for _, body := range list.Val[3:] {
+					if _, e := eval(body, do_env); e != nil {
+						return nil, e
+					}
+				}
+				// Compute all step values simultaneously, then assign
+				newVals := make([]Expression, len(vars))
+				for i, v := range vars {
+					if v.step != nil {
+						newVals[i], e = eval(v.step, do_env)
+						if e != nil {
+							return nil, e
+						}
+					} else {
+						newVals[i], e = do_env.Get(v.sym)
+						if e != nil {
+							return nil, e
+						}
+					}
+				}
+				for i, v := range vars {
+					do_env.Set(v.sym, newVals[i])
+				}
+			}
 		case "let":
 			// Support named let: (let name ((var init) ...) body...)
 			if Symbol_Q(a1) {
@@ -590,6 +694,20 @@ func macroexpand(ast Expression, env EnvType) (Expression, error) {
 
 // print
 func print(exp Expression) (string, error) {
+	if mv, ok := exp.(MultipleValues); ok {
+		parts := make([]string, len(mv.Vals))
+		for i, v := range mv.Vals {
+			s, e := print(v)
+			if e != nil {
+				return "", e
+			}
+			parts[i] = s
+		}
+		return strings.Join(parts, "\n"), nil
+	}
+	if r, ok := exp.(rune); ok {
+		return string(r), nil
+	}
 	if List_Q(exp) || Symbol_Q(exp) {
 		return fmt.Sprintf("'%v", exp), nil
 	}

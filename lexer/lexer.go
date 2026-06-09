@@ -17,15 +17,33 @@ type Lexer struct {
 	buf bytes.Buffer
 }
 
-// New returns new lexer
-func Read(r io.Reader) (Expression, error) {
+// NewLexer creates a stateful lexer that can read multiple expressions
+// from the same reader without reinitializing.
+func NewLexer(r io.Reader) *Lexer {
 	var s scanner.Scanner
 	s.Init(r)
 	s.Mode &^= scanner.ScanChars | scanner.ScanRawStrings
-	l := &Lexer{
-		Scanner: &s,
-	}
+	return &Lexer{Scanner: &s}
+}
+
+// ReadExpr reads the next expression from the lexer.
+func (l *Lexer) ReadExpr() (Expression, error) {
 	return l.readForm()
+}
+
+// NextRune consumes and returns the next rune (scanner.EOF == -1 at end).
+func (l *Lexer) NextRune() rune {
+	return l.Next()
+}
+
+// PeekRune returns the next rune without consuming it.
+func (l *Lexer) PeekRune() rune {
+	return l.Peek()
+}
+
+// Read returns the first expression parsed from r.
+func Read(r io.Reader) (Expression, error) {
+	return NewLexer(r).readForm()
 }
 
 func makeExpression(token string, exp Expression) List {

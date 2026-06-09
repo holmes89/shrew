@@ -7,6 +7,45 @@ import (
 	"strings"
 )
 
+// EOF sentinel — returned by read at end of input
+type EOF struct{}
+
+func (e EOF) String() string { return "#<eof-object>" }
+
+func EOF_Q(obj Expression) bool {
+	_, ok := obj.(EOF)
+	return ok
+}
+
+// MultipleValues — wraps multiple return values from (values ...)
+type MultipleValues struct {
+	Vals []Expression
+}
+
+// PortReader is implemented by lexer.Lexer; the interface breaks the
+// circular import that would arise from types importing lexer.
+type PortReader interface {
+	ReadExpr() (Expression, error)
+	NextRune() rune
+	PeekRune() rune
+}
+
+// Port — an open input port
+type Port struct {
+	R      PortReader
+	Name   string
+	Closed bool
+}
+
+func (p *Port) String() string {
+	return fmt.Sprintf("#<port %q>", p.Name)
+}
+
+func Port_Q(obj Expression) bool {
+	_, ok := obj.(*Port)
+	return ok
+}
+
 // Errors/Exceptions
 type ExpressionError struct {
 	Obj Expression
