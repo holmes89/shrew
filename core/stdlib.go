@@ -4,10 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"sort"
-	"strings"
 	"strconv"
+	"strings"
+	"text/scanner"
 
+	"github.com/holmes89/shrew/lexer"
 	. "github.com/holmes89/shrew/types"
 )
 
@@ -132,6 +135,32 @@ func init() {
 	NS[makeSymbol("negative?")] = negativeQ
 	NS[makeSymbol("odd?")] = oddQ
 	NS[makeSymbol("type-of")] = typeOf
+
+	// Association lists
+	NS[makeSymbol("assoc")] = assocFn
+	NS[makeSymbol("assq")] = assqFn
+	NS[makeSymbol("assv")] = assvFn
+
+	// Membership
+	NS[makeSymbol("member")] = memberFn
+	NS[makeSymbol("memq")] = memqFn
+	NS[makeSymbol("memv")] = memvFn
+
+	// Multiple values
+	NS[makeSymbol("values")] = valuesFn
+	NS[makeSymbol("call-with-values")] = callWithValuesFn
+
+	// Ports / IO
+	NS[makeSymbol("open-input-file")] = openInputFile
+	NS[makeSymbol("open-input-string")] = openInputString
+	NS[makeSymbol("close-input-port")] = closeInputPort
+	NS[makeSymbol("read")] = readFn
+	NS[makeSymbol("read-char")] = readCharFn
+	NS[makeSymbol("peek-char")] = peekCharFn
+	NS[makeSymbol("char-ready?")] = charReadyFn
+	NS[makeSymbol("eof-object?")] = eofObjectQ
+	NS[makeSymbol("eof-object")] = func(a []Expression) (Expression, error) { return EOF{}, nil }
+	NS[makeSymbol("input-port?")] = inputPortQ
 }
 
 // ── Math ─────────────────────────────────────────────────────────────────────
@@ -1580,4 +1609,234 @@ func typeOf(a []Expression) (Expression, error) {
 		return "nil", nil
 	}
 	return "unknown", nil
+}
+
+// ── Association lists ─────────────────────────────────────────────────────────
+
+func assocFn(a []Expression) (Expression, error) {
+	if len(a) != 2 {
+		return nil, errors.New("assoc: requires 2 arguments")
+	}
+	return assocSearch(a[0], a[1], Equal_Q)
+}
+
+func assqFn(a []Expression) (Expression, error) {
+	if len(a) != 2 {
+		return nil, errors.New("assq: requires 2 arguments")
+	}
+	return assocSearch(a[0], a[1], func(x, y Expression) bool { return x == y })
+}
+
+func assvFn(a []Expression) (Expression, error) {
+	if len(a) != 2 {
+		return nil, errors.New("assv: requires 2 arguments")
+	}
+	return assocSearch(a[0], a[1], func(x, y Expression) bool { return x == y })
+}
+
+func assocSearch(key, lst Expression, cmp func(Expression, Expression) bool) (Expression, error) {
+	if lst == nil {
+		return false, nil
+	}
+	items, e := GetSlice(lst)
+	if e != nil {
+		return nil, errors.New("assoc: second argument must be a list")
+	}
+	for _, item := range items {
+		pair, e := GetSlice(item)
+		if e != nil || len(pair) < 1 {
+			continue
+		}
+		if cmp(key, pair[0]) {
+			return item, nil
+		}
+	}
+	return false, nil
+}
+
+// ── Membership ────────────────────────────────────────────────────────────────
+
+func memberFn(a []Expression) (Expression, error) {
+	if len(a) != 2 {
+		return nil, errors.New("member: requires 2 arguments")
+	}
+	return memberSearch(a[0], a[1], Equal_Q)
+}
+
+func memqFn(a []Expression) (Expression, error) {
+	if len(a) != 2 {
+		return nil, errors.New("memq: requires 2 arguments")
+	}
+	return memberSearch(a[0], a[1], func(x, y Expression) bool { return x == y })
+}
+
+func memvFn(a []Expression) (Expression, error) {
+	if len(a) != 2 {
+		return nil, errors.New("memv: requires 2 arguments")
+	}
+	return memberSearch(a[0], a[1], func(x, y Expression) bool { return x == y })
+}
+
+func memberSearch(x, lst Expression, cmp func(Expression, Expression) bool) (Expression, error) {
+	if lst == nil {
+		return false, nil
+	}
+	items, e := GetSlice(lst)
+	if e != nil {
+		return nil, errors.New("member: second argument must be a list")
+	}
+	for i, item := range items {
+		if cmp(x, item) {
+			return List{Val: items[i:]}, nil
+		}
+	}
+	return false, nil
+}
+
+// ── Multiple values ───────────────────────────────────────────────────────────
+
+func valuesFn(a []Expression) (Expression, error) {
+	if len(a) == 1 {
+		return a[0], nil
+	}
+	return MultipleValues{Vals: a}, nil
+}
+
+func callWithValuesFn(a []Expression) (Expression, error) {
+	if len(a) != 2 {
+		return nil, errors.New("call-with-values: requires 2 arguments")
+	}
+	produced, e := Apply(a[0], []Expression{})
+	if e != nil {
+		return nil, e
+	}
+	var args []Expression
+	if mv, ok := produced.(MultipleValues); ok {
+		args = mv.Vals
+	} else {
+		args = []Expression{produced}
+	}
+	return Apply(a[1], args)
+}
+
+// ── Ports / IO ────────────────────────────────────────────────────────────────
+
+func openInputFile(a []Expression) (Expression, error) {
+	if len(a) != 1 {
+		return nil, errors.New("open-input-file: requires 1 argument")
+	}
+	name, ok := a[0].(string)
+	if !ok {
+		return nil, errors.New("open-input-file: argument must be a string")
+	}
+	f, e := os.Open(name)
+	if e != nil {
+		return nil, e
+	}
+	return &Port{R: lexer.NewLexer(f), Name: name}, nil
+}
+
+func openInputString(a []Expression) (Expression, error) {
+	if len(a) != 1 {
+		return nil, errors.New("open-input-string: requires 1 argument")
+	}
+	s, ok := a[0].(string)
+	if !ok {
+		return nil, errors.New("open-input-string: argument must be a string")
+	}
+	return &Port{R: lexer.NewLexer(strings.NewReader(s)), Name: "<string>"}, nil
+}
+
+func closeInputPort(a []Expression) (Expression, error) {
+	if len(a) != 1 {
+		return nil, errors.New("close-input-port: requires 1 argument")
+	}
+	p, ok := a[0].(*Port)
+	if !ok {
+		return nil, errors.New("close-input-port: argument must be a port")
+	}
+	p.Closed = true
+	return nil, nil
+}
+
+func readFn(a []Expression) (Expression, error) {
+	if len(a) != 1 {
+		return nil, errors.New("read: requires 1 argument (port)")
+	}
+	p, ok := a[0].(*Port)
+	if !ok {
+		return nil, errors.New("read: argument must be a port")
+	}
+	if p.Closed {
+		return EOF{}, nil
+	}
+	exp, e := p.R.ReadExpr()
+	if e != nil {
+		if strings.Contains(e.Error(), "<empty line>") || strings.Contains(e.Error(), "EOF") {
+			return EOF{}, nil
+		}
+		return nil, e
+	}
+	return exp, nil
+}
+
+func readCharFn(a []Expression) (Expression, error) {
+	if len(a) != 1 {
+		return nil, errors.New("read-char: requires 1 argument (port)")
+	}
+	p, ok := a[0].(*Port)
+	if !ok {
+		return nil, errors.New("read-char: argument must be a port")
+	}
+	if p.Closed {
+		return EOF{}, nil
+	}
+	r := p.R.NextRune()
+	if r == scanner.EOF {
+		return EOF{}, nil
+	}
+	return r, nil
+}
+
+func peekCharFn(a []Expression) (Expression, error) {
+	if len(a) != 1 {
+		return nil, errors.New("peek-char: requires 1 argument (port)")
+	}
+	p, ok := a[0].(*Port)
+	if !ok {
+		return nil, errors.New("peek-char: argument must be a port")
+	}
+	if p.Closed {
+		return EOF{}, nil
+	}
+	r := p.R.PeekRune()
+	if r == scanner.EOF {
+		return EOF{}, nil
+	}
+	return r, nil
+}
+
+func charReadyFn(a []Expression) (Expression, error) {
+	if len(a) != 1 {
+		return nil, errors.New("char-ready?: requires 1 argument (port)")
+	}
+	_, ok := a[0].(*Port)
+	if !ok {
+		return nil, errors.New("char-ready?: argument must be a port")
+	}
+	return true, nil // always ready for string/file ports
+}
+
+func eofObjectQ(a []Expression) (Expression, error) {
+	if len(a) != 1 {
+		return nil, errors.New("eof-object?: requires 1 argument")
+	}
+	return EOF_Q(a[0]), nil
+}
+
+func inputPortQ(a []Expression) (Expression, error) {
+	if len(a) != 1 {
+		return nil, errors.New("input-port?: requires 1 argument")
+	}
+	return Port_Q(a[0]), nil
 }
